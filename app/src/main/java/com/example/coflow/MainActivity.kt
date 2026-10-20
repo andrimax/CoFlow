@@ -23,7 +23,7 @@ class MainActivity : ComponentActivity() {
             CoFlowTheme {
                 // При запуске всегда показываем авторизацию.
                 var isAuthenticated by remember {
-                    mutableStateOf(true)
+                    mutableStateOf(false)
                 }
 
                 if (isAuthenticated) {
