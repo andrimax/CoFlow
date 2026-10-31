@@ -10,6 +10,11 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.tasks.await
 
+/**
+ * Firebase Auth + профиль в `users/{uid}`.
+ * В профиле хранятся `uid`, `name`, `email` и `createdAt` (Timestamp).
+ * Если запись профиля не удалась, register() удаляет созданного Auth-пользователя.
+ */
 class FirebaseAuthRepositoryImpl : AuthRepository {
     private val auth = FirebaseAuth.getInstance()
     private val db = FirebaseFirestore.getInstance()
@@ -22,28 +27,38 @@ class FirebaseAuthRepositoryImpl : AuthRepository {
     ): Result<UserModel> =
         try {
             val result = auth.createUserWithEmailAndPassword(email, password).await()
-            val uid = result.user?.uid ?: throw Exception("Не удалось получить UID")
+            val firebaseUser = result.user ?: throw Exception("Не удалось получить UID")
+            val uid = firebaseUser.uid
 
-            usersCollection
-                .document(uid)
-                .set(
-                    mapOf(
-                        "uid" to uid,
-                        "email" to email,
-                        "name" to name,
-                        "createdAt" to FieldValue.serverTimestamp(),
-                    ),
-                ).await()
+            val user = UserModel(uid = uid, email = email, name = name)
 
-            Result.success(UserModel(id = uid, name = name, email = email))
+            try {
+                usersCollection
+                    .document(uid)
+                    .set(
+                        mapOf(
+                            "uid" to user.uid,
+                            "email" to user.email,
+                            "name" to user.name,
+                            "createdAt" to FieldValue.serverTimestamp(),
+                        ),
+                    ).await()
+            } catch (e: Exception) {
+                // откат: не оставляем пользователя без профиля
+                runCatching { firebaseUser.delete().await() }
+                throw e
+            }
+
+            Result.success(user)
         } catch (e: Exception) {
-            val errorMessage =
+            val msg =
                 when (e) {
                     is FirebaseAuthWeakPasswordException -> "Пароль слишком простой (минимум 6 символов)"
                     is FirebaseAuthUserCollisionException -> "Пользователь с такой почтой уже существует"
+                    is FirebaseAuthInvalidCredentialsException -> "Некорректный email"
                     else -> e.message ?: "Ошибка регистрации"
                 }
-            Result.failure(Exception(errorMessage))
+            Result.failure(Exception(msg))
         }
 
     override suspend fun login(
@@ -52,57 +67,78 @@ class FirebaseAuthRepositoryImpl : AuthRepository {
     ): Result<UserModel> =
         try {
             auth.signInWithEmailAndPassword(email, password).await()
-            val uid = auth.currentUser?.uid ?: throw Exception("Не удалось получить UID")
+            val fbUser = auth.currentUser ?: throw Exception("Не удалось получить UID")
+            val uid = fbUser.uid
 
             val doc = usersCollection.document(uid).get().await()
             val user =
-                doc.toObject(UserModel::class.java)?.copy(id = doc.id)
-                    ?: throw Exception("Профиль пользователя не найден")
-
+                if (doc.exists()) {
+                    doc
+                        .toObject(UserModel::class.java)
+                        ?.copy(uid = uid)
+                        ?: throw Exception("Не удалось прочитать профиль")
+                } else {
+                    // Восстановление после сбоя register(): Auth есть, Firestore-до
+                    // TODO: пересмотреть этот сомнительный функционал
+                    val restored =
+                        UserModel(
+                            uid = uid,
+                            email = fbUser.email.orEmpty(),
+                            name = fbUser.displayName.orEmpty(),
+                        )
+                    usersCollection
+                        .document(uid)
+                        .set(
+                            mapOf(
+                                "uid" to restored.uid,
+                                "email" to restored.email,
+                                "name" to restored.name,
+                                "createdAt" to FieldValue.serverTimestamp(),
+                            ),
+                        ).await()
+                    restored
+                }
             Result.success(user)
         } catch (e: Exception) {
-            val errorMessage =
+            val msg =
                 when (e) {
                     is FirebaseAuthInvalidCredentialsException -> "Неверная почта или пароль"
                     else -> e.message ?: "Ошибка входа"
                 }
-            Result.failure(Exception(errorMessage))
+            Result.failure(Exception(msg))
         }
 
     override suspend fun signInWithGoogle(idToken: String): Result<UserModel> =
         try {
             val credential = GoogleAuthProvider.getCredential(idToken, null)
             val authResult = auth.signInWithCredential(credential).await()
-            val user = authResult.user ?: throw Exception("Не удалось получить пользователя")
-            val uid = user.uid
+            val fbUser = authResult.user ?: throw Exception("Не удалось получить пользователя")
+            val uid = fbUser.uid
+            val email = fbUser.email ?: throw Exception("Google-аккаунт не содержит email")
+            val name = fbUser.displayName?.takeIf { it.isNotBlank() } ?: "Пользователь Google"
 
-            val email =
-                user.email
-                    ?: throw Exception("Google-аккаунт не содержит email")
-            val name = user.displayName ?: "Пользователь Google"
-
-            // Если пользователь заходит впервые — создаем документ в Firestore
-            val userDoc = usersCollection.document(uid).get().await()
-            val appUser =
-                if (userDoc.exists()) {
-                    userDoc.toObject(UserModel::class.java)?.copy(id = userDoc.id)
+            val doc = usersCollection.document(uid).get().await()
+            val user =
+                if (doc.exists()) {
+                    doc
+                        .toObject(UserModel::class.java)
+                        ?.copy(uid = uid)
                         ?: throw Exception("Не удалось прочитать профиль")
                 } else {
+                    val newUser = UserModel(uid = uid, name = name, email = email)
                     usersCollection
                         .document(uid)
                         .set(
                             mapOf(
-                                "uid" to uid,
-                                "email" to email,
-                                "name" to name,
+                                "uid" to newUser.uid,
+                                "email" to newUser.email,
+                                "name" to newUser.name,
                                 "createdAt" to FieldValue.serverTimestamp(),
                             ),
                         ).await()
-
-                    UserModel(id = uid, name = name, email = email)
+                    newUser
                 }
-
-            Result.success(appUser)
+            Result.success(user)
         } catch (e: Exception) {
             Result.failure(Exception(e.message ?: "Ошибка входа через Google"))
         }

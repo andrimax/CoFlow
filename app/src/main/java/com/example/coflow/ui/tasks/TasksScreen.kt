@@ -2,6 +2,7 @@ package com.example.coflow.ui.tasks
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -19,6 +20,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -28,188 +30,37 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.coflow.R
-import com.example.coflow.models.TaskModel
 import com.example.coflow.models.TaskStatus
 import com.example.coflow.ui.components.*
 import com.example.coflow.ui.theme.*
 import java.time.LocalDate
-import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
-
-private enum class TaskGrouping { STATUS, DEADLINE }
-
-private data class TaskGroup(
-    val id: String,
-    val title: String,
-    val tasks: List<TaskModel>,
-)
 
 @Composable
 fun TasksScreen(
-    viewModel: TaskScreenViewModel =
-        androidx.lifecycle.viewmodel.compose
-            .viewModel(),
-    // ← ViewModel создается сам
+    state: TasksUiState,
     onNavigateToCreateTask: () -> Unit,
-    onNavigateToTaskDetail: (String) -> Unit,
+    onNavigateToTaskDetail: (Int) -> Unit,
+    onGroupingChange: (TaskGrouping) -> Unit,
+    onFilterToggle: (String) -> Unit,
+    onToggleGroup: (String) -> Unit,
+    onNavigateToProjects: () -> Unit,
+    onNavigateToProfile: () -> Unit,
 ) {
-    // 1. Получаем состояние из ViewModel
-    val uiState by viewModel.uiState.collectAsState()
-    val currentUserId = viewModel.getCurrentUserId()
-
-    // 2. Извлекаем список задач. Если идет загрузка или ошибка, покажем пустой список (или экран загрузки ниже)
-    val tasks =
-        when (val state = uiState) {
-            is TasksUiState.Success -> state.tasks
-            else -> emptyList()
-        }
-
-    // 3. (Опционально, но рекомендуется) Показываем индикатор загрузки, если данные еще не пришли
-    if (uiState is TasksUiState.Loading) {
-        androidx.compose.foundation.layout.Box(
-            modifier =
-                androidx.compose.ui.Modifier
-                    .fillMaxSize(),
-            contentAlignment = androidx.compose.ui.Alignment.Center,
-        ) {
-            androidx.compose.material3.CircularProgressIndicator(color = com.example.coflow.ui.theme.CoFlowColors.Blue)
-        }
-        return // Прерываем отрисовку остального UI, пока грузится
-    }
-
-    var grouping by remember { mutableStateOf(TaskGrouping.STATUS) }
-    var selectedFilters by remember { mutableStateOf(setOf<String>()) }
-    var collapsedGroups by remember { mutableStateOf(setOf("IN_PROCESS")) }
-    var dialogTitle by remember { mutableStateOf<String?>(null) }
-    var dialogMessage by remember { mutableStateOf("") }
-
     val scrollState = rememberScrollState()
-    var previousScroll by remember { mutableStateOf(0) }
-    var bottomVisible by remember { mutableStateOf(true) }
-
-    LaunchedEffect(scrollState.value) {
-        val current = scrollState.value
-        if (current > previousScroll + 2) {
-            bottomVisible = false
-        } else if (current < previousScroll - 2) {
-            bottomVisible = true
-        }
-        previousScroll = current
-    }
-
-    val today = LocalDate.now()
-    val now = LocalDateTime.now()
-
-    val filteredTasks =
-        tasks.filter { task ->
-            if (selectedFilters.isEmpty()) {
-                true
-            } else {
-                val isMineSelected = selectedFilters.contains(stringResource(R.string.filter_mine))
-                val projectFilters = selectedFilters.filter { it.startsWith("Проект") }
-
-                val isMine = task.executorId == currentUserId || task.authorId == currentUserId
-
-                // Пока фильтруем по ID проекта (projectId).
-                // Когда появится кэш имён проектов — заменим на сравнение по имени.
-                val matchesProject =
-                    projectFilters.any { filterName ->
-                        task.projectId == filterName || task.projectId?.contains(filterName) == true
-                    }
-
-                (isMineSelected && isMine) || matchesProject
-            }
-        }
-
-    val groups =
-        when (grouping) {
-            TaskGrouping.STATUS -> {
-                listOf(
-                    TaskGroup(
-                        "TODO",
-                        stringResource(R.string.tasks_group_planned),
-                        filteredTasks.filter { it.status == TaskStatus.TODO },
-                    ),
-                    TaskGroup(
-                        "IN_PROCESS",
-                        stringResource(R.string.tasks_group_active),
-                        filteredTasks.filter { it.status == TaskStatus.IN_PROCESS },
-                    ),
-                    TaskGroup(
-                        "DONE",
-                        stringResource(R.string.tasks_group_completed),
-                        filteredTasks.filter { it.status == TaskStatus.DONE },
-                    ),
-                )
-            }
-
-            TaskGrouping.DEADLINE -> {
-                listOf(
-                    TaskGroup(
-                        "TODAY",
-                        stringResource(R.string.tasks_group_today),
-                        filteredTasks
-                            .filter { it.deadline.toLocalDate() == today }
-                            .sortedBy { it.deadline },
-                    ),
-                    TaskGroup(
-                        "THIS_WEEK",
-                        stringResource(R.string.tasks_group_this_week),
-                        filteredTasks
-                            .filter {
-                                val d = it.deadline.toLocalDate()
-                                d.isAfter(today) && !d.isAfter(today.plusDays(6))
-                            }.sortedBy { it.deadline },
-                    ),
-                    TaskGroup(
-                        "NEXT_WEEK",
-                        stringResource(R.string.tasks_group_next_week),
-                        filteredTasks
-                            .filter {
-                                val d = it.deadline.toLocalDate()
-                                d.isAfter(today.plusDays(6)) && !d.isAfter(today.plusDays(13))
-                            }.sortedBy { it.deadline },
-                    ),
-                )
-            }
-        }
-
-    val completedCount = filteredTasks.count { it.status == TaskStatus.DONE }
-    val activeCount = filteredTasks.size - completedCount
-    val filterButtonText =
-        when {
-            selectedFilters.isEmpty() -> stringResource(R.string.filter_none)
-            selectedFilters.size == 1 -> selectedFilters.first()
-            else -> "Выбрано: ${selectedFilters.size}"
-        }
 
     Box(modifier = Modifier.fillMaxSize().background(coFlowTasksBackgroundBrush())) {
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = CoFlowSpacing.ScreenHorizontal)) {
-            // ИСПРАВЛЕНО: Единый, чистый заголовок без стрелки назад, но с подзаголовком и колокольчиком
             CoFlowScreenHeader(
                 title = stringResource(R.string.my_tasks_header),
-                subtitle = "$activeCount ${stringResource(
+                subtitle = "${state.activeCount} ${stringResource(
                     R.string.my_tasks_active,
-                )} · $completedCount ${stringResource(R.string.my_tasks_completed)}",
+                )} · ${state.completedCount} ${stringResource(R.string.my_tasks_completed)}",
                 trailingContent = {
-                    Box {
-                        CoFlowGlassIconButton(
-                            iconName = "bell",
-                            onClick = {
-                                dialogTitle = "Уведомления"
-                                dialogMessage = "Интерфейс уведомлений ещё не реализован."
-                            },
-                        )
-                        Box(
-                            modifier =
-                                Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(top = 3.dp, end = 3.dp)
-                                    .size(6.dp)
-                                    .background(CoFlowColors.Blue, CircleShape),
-                        )
-                    }
+                    NotificationBell()
                 },
             )
 
@@ -224,21 +75,17 @@ fun TasksScreen(
                         .verticalScroll(scrollState),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                groups.forEach { group ->
+                state.groups.forEach { group ->
                     TaskGroupCard(
                         group = group,
-                        expanded = group.id !in collapsedGroups,
-                        onToggle = {
-                            collapsedGroups =
-                                if (group.id in collapsedGroups) collapsedGroups - group.id else collapsedGroups + group.id
-                        },
+                        onToggle = { onToggleGroup(group.id) },
                         onTaskClick = { task -> onNavigateToTaskDetail(task.id) },
                     )
                 }
                 Spacer(Modifier.height(18.dp))
             }
 
-            AnimatedVisibility(visible = bottomVisible) {
+            AnimatedVisibility(visible = state.isBottomBarVisible) {
                 Column(
                     modifier =
                         Modifier.fillMaxWidth().padding(
@@ -253,29 +100,16 @@ fun TasksScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         SortFilterPanel(
-                            tasks = tasks, // <-- ДОБАВЛЕНО: передаем реальные задачи из ViewModel
                             modifier = Modifier.weight(1f),
-                            grouping = grouping,
-                            onGroupingChange = { newGrouping ->
-                                grouping = newGrouping
-                                collapsedGroups = emptySet()
-                            },
-                            selectedFilters = selectedFilters,
-                            filterButtonText = filterButtonText,
-                            onFilterToggle = { option ->
-                                if (option == "Без фильтра") {
-                                    selectedFilters = emptySet()
-                                } else {
-                                    val newSet = selectedFilters.toMutableSet()
-                                    if (newSet.contains("Без фильтра")) newSet.remove("Без фильтра")
-                                    if (newSet.contains(option)) newSet.remove(option) else newSet.add(option)
-                                    selectedFilters = newSet.toSet()
-                                }
-                            },
+                            grouping = state.currentGrouping,
+                            onGroupingChange = onGroupingChange,
+                            filterButtonText = state.filterButtonText,
+                            onFilterToggle = onFilterToggle,
+                            selectedFilters = state.selectedFilters,
                         )
                         Spacer(Modifier.width(16.dp))
 
-                        CoFlowFabButton(onClick = onNavigateToCreateTask)
+                        CoFlowFabButton(onClick = onNavigateToCreateTask, iconName = "task_plus")
                     }
                     Spacer(Modifier.height(7.dp))
 
@@ -283,40 +117,31 @@ fun TasksScreen(
                         items =
                             listOf(
                                 NavItem(icon = "tasks", title = stringResource(R.string.navigation_tasks), selected = true, onClick = {}),
-                                NavItem(icon = "folder", title = stringResource(R.string.navigation_projects), selected = false, onClick = {
-                                    dialogTitle =
-                                        "Проекты"
-                                    ; dialogMessage = "Интерфейс проектов ещё не реализован."
-                                }),
-                                NavItem(icon = "person", title = stringResource(R.string.navigation_profile), selected = false, onClick = {
-                                    dialogTitle =
-                                        "Профиль"
-                                    ; dialogMessage = "Интерфейс профиля ещё не реализован."
-                                }),
+                                NavItem(
+                                    icon = "folder",
+                                    title = stringResource(R.string.navigation_projects),
+                                    selected = false,
+                                    onClick = onNavigateToProjects,
+                                ),
+                                NavItem(
+                                    icon = "person",
+                                    title = stringResource(R.string.navigation_profile),
+                                    selected = false,
+                                    onClick = {},
+                                ),
                             ),
                     )
                 }
             }
-        }
-
-        if (dialogTitle != null) {
-            AlertDialog(
-                onDismissRequest = { dialogTitle = null },
-                title = { Text(text = dialogTitle!!, color = CoFlowColors.TextPrimary) },
-                text = { Text(text = dialogMessage, color = CoFlowColors.TextSecondary) },
-                confirmButton = { TextButton(onClick = { dialogTitle = null }) { Text("Понятно", color = CoFlowColors.Blue) } },
-                containerColor = Color(0xFFF4F7FF),
-            )
         }
     }
 }
 
 @Composable
 private fun TaskGroupCard(
-    group: TaskGroup,
-    expanded: Boolean,
+    group: TaskGroupUi,
     onToggle: () -> Unit,
-    onTaskClick: (TaskModel) -> Unit,
+    onTaskClick: (TaskRowUi) -> Unit,
 ) {
     CoFlowGlassCard(modifier = Modifier.fillMaxWidth().clickable(onClick = onToggle)) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -333,10 +158,10 @@ private fun TaskGroupCard(
                 Text(text = group.tasks.size.toString(), fontSize = 10.sp, fontWeight = FontWeight.Medium, color = CoFlowColors.Blue)
             }
             Spacer(Modifier.weight(1f))
-            Text(text = if (expanded) "⌄" else "›", color = CoFlowColors.Blue, fontSize = 17.sp)
+            Text(text = if (group.isExpanded) "⌄" else "›", color = CoFlowColors.Blue, fontSize = 17.sp)
         }
 
-        if (expanded) {
+        if (group.isExpanded) {
             if (group.tasks.isEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 Text(text = "Нет задач", fontSize = 11.sp, color = CoFlowColors.TextSecondary)
@@ -355,35 +180,24 @@ private fun TaskGroupCard(
 
 @Composable
 private fun TaskRow(
-    task: TaskModel,
+    task: TaskRowUi,
     onClick: () -> Unit,
 ) {
     val formatter = remember { DateTimeFormatter.ofPattern("dd.MM.yy") }
-    val today = LocalDate.now()
-    val taskDate = task.deadline.toLocalDate()
-
-    // Пока показываем ID проекта как временное решение.
-    // Позже здесь будет резолв имени из кэша проектов.
-    val projectNameDisplay = task.projectId ?: "Без проекта"
-
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).clickable { onClick() }) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = task.title,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
-                color = if (task.status == TaskStatus.DONE) CoFlowColors.TextSecondary else CoFlowColors.TextPrimary,
+                color = if (task.isDone) CoFlowColors.TextSecondary else CoFlowColors.TextPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            if (taskDate.isBefore(today) && task.status != TaskStatus.DONE) {
+            if (task.isOverdue) {
                 Spacer(Modifier.width(4.dp))
-                Text(
-                    text = stringResource(R.string.task_outdated),
-                    fontSize = 8.sp,
-                    color = CoFlowColors.Error,
-                )
+                Text(text = stringResource(R.string.task_outdated), fontSize = 8.sp, color = CoFlowColors.Error)
             }
         }
         Spacer(Modifier.height(3.dp))
@@ -392,17 +206,8 @@ private fun TaskRow(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = projectNameDisplay,
-                fontSize = 10.sp,
-                color = CoFlowColors.TextSecondary,
-                maxLines = 1,
-            )
-            Text(
-                text = taskDate.format(formatter),
-                fontSize = 10.sp,
-                color = CoFlowColors.TextSecondary,
-            )
+            Text(text = task.projectName, fontSize = 10.sp, color = CoFlowColors.TextSecondary, maxLines = 1)
+            Text(text = task.dueDateFormatted, fontSize = 10.sp, color = CoFlowColors.TextSecondary)
         }
     }
 }
@@ -410,7 +215,6 @@ private fun TaskRow(
 // --- Внутренние компоненты для панели фильтров ---
 @Composable
 private fun SortFilterPanel(
-    tasks: List<TaskModel>, // <-- ДОБАВЛЕНО: теперь функция видит список задач
     modifier: Modifier = Modifier,
     grouping: TaskGrouping,
     onGroupingChange: (TaskGrouping) -> Unit,
@@ -515,17 +319,13 @@ private fun SortFilterPanel(
                 shadowElevation = 0.dp,
                 border = BorderStroke(1.dp, Color.White.copy(alpha = 0.82f)),
             ) {
-                // Берем реальные ID проектов из загруженных задач, убираем дубликаты
-                val realProjectIds = tasks.mapNotNull { it.projectId }.distinct()
-
-                // Формируем итоговый список: базовые фильтры + реальные проекты из БД
-                val availableFilters =
-                    listOf(
-                        stringResource(R.string.filter_none),
-                        stringResource(R.string.filter_mine),
-                    ) + realProjectIds
-
-                availableFilters.forEach { option ->
+                listOf(
+                    stringResource(R.string.filter_none),
+                    stringResource(R.string.filter_mine),
+                    "Проект 1",
+                    "Проект 2",
+                    "Проект 3",
+                ).forEach { option ->
                     GlassFilterOption(title = option, selected = selectedFilters.contains(option)) { onFilterToggle(option) }
                 }
             }
@@ -573,13 +373,13 @@ private fun GlassGroupingOption(
                 .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        androidx.compose.foundation.Canvas(modifier = Modifier.size(10.dp)) {
+        Canvas(modifier = Modifier.size(10.dp)) {
             if (selected) {
                 drawCircle(
                     brush =
                         Brush.linearGradient(
                             colors = listOf(Color(0xFF6EA5FF), CoFlowColors.Blue),
-                            start = androidx.compose.ui.geometry.Offset.Zero,
+                            start = Offset.Zero,
                             end =
                                 androidx.compose.ui.geometry
                                     .Offset(size.width, size.height),
@@ -638,14 +438,97 @@ private fun GlassFilterOption(
     }
 }
 
-@Preview(name = "Tasks Screen - Phone", showBackground = true, widthDp = 390, heightDp = 844, showSystemUi = true)
 @Composable
-private fun TasksScreenPreview() {
+fun TasksRoute(
+    viewModel: TasksScreenViewModel = viewModel(),
+    onNavigateToCreateTask: () -> Unit,
+    onNavigateToTaskDetail: (Int) -> Unit,
+    onNavigateToProjects: () -> Unit,
+    onNavigateToProfile: () -> Unit,
+) {
+    // Подписываемся на изменения состояния с учетом жизненного цикла
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+
+    TasksScreen(
+        state = state,
+        onNavigateToCreateTask = onNavigateToCreateTask,
+        onNavigateToTaskDetail = onNavigateToTaskDetail,
+        onGroupingChange = viewModel::onGroupingChange,
+        onFilterToggle = viewModel::onFilterToggle,
+        onToggleGroup = viewModel::onToggleGroup,
+        onNavigateToProjects = onNavigateToProjects,
+        onNavigateToProfile = onNavigateToProfile,
+    )
+}
+
+@Preview(name = "По статусу (Обычное)", showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+fun TasksScreen_Default_Preview() {
     CoFlowTheme {
-        // ViewModel создается автоматически, параметр tasks удален, так как экран сам управляет данными
         TasksScreen(
-            onNavigateToCreateTask = { println("🔥 PREVIEW: Нажата кнопка создания задачи (+)") },
-            onNavigateToTaskDetail = { id: String -> println("PREVIEW: Нажата задача с ID: $id") },
+            state =
+                TasksUiState(
+                    activeCount = 5,
+                    completedCount = 12,
+                    groups =
+                        listOf(
+                            TaskGroupUi(
+                                id = "TODO",
+                                title = "К исполнению",
+                                count = 2,
+                                isExpanded = true,
+                                tasks =
+                                    listOf(
+                                        TaskRowUi(
+                                            1,
+                                            "Обновить иконки навигации",
+                                            "Дизайн-система",
+                                            "30.10.26",
+                                            isDone = false,
+                                            isOverdue = false,
+                                        ),
+                                        TaskRowUi(2, "Согласовать ТЗ с заказчиком", "Сайт", "01.11.26", isDone = false, isOverdue = false),
+                                    ),
+                            ),
+                            TaskGroupUi(
+                                id = "IN_PROGRESS",
+                                title = "В процессе",
+                                count = 3,
+                                isExpanded = false,
+                                tasks =
+                                    listOf(
+                                        TaskRowUi(
+                                            3,
+                                            "Разработать онбординг",
+                                            "Мобильное приложение",
+                                            "24.10.26",
+                                            isDone = false,
+                                            isOverdue = true,
+                                        ), // Просрочено!
+                                        TaskRowUi(4, "Настроить CI/CD", "Бэкенд", "28.10.26", isDone = false, isOverdue = false),
+                                    ),
+                            ),
+                            TaskGroupUi(
+                                id = "DONE",
+                                title = "Сделано",
+                                count = 12,
+                                isExpanded = false,
+                                tasks = emptyList(),
+                            ),
+                        ),
+                    currentGrouping = TaskGrouping.STATUS,
+                    filterButtonText = "Без фильтра",
+                    availableFilters = listOf("Без фильтра", "Мои задачи", "Проект: Дизайн-система", "Проект: Мобильное приложение"),
+                    isBottomBarVisible = true,
+                    selectedFilters = setOf("Мои задачи"),
+                ),
+            onNavigateToCreateTask = {},
+            onNavigateToTaskDetail = {},
+            onGroupingChange = {},
+            onFilterToggle = {},
+            onToggleGroup = {},
+            onNavigateToProjects = {},
+            onNavigateToProfile = {},
         )
     }
 }
